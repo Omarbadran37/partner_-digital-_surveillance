@@ -1,0 +1,1871 @@
+---
+title: "Capstone_2"
+author: "Omar Badran"
+date: "10/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Libaries
+
+```{r library}
+library(tidyverse)
+library(caret)
+library(readxl)
+library(skimr)
+library(tidymodels)
+library(reshape2)
+library(grid)
+library(gridExtra)
+library(ranger)
+library(randomForest)
+library(vip)  
+
+theme_set(theme_classic())
+```
+
+## Load date
+
+
+```{r data}
+partner <- read_excel("~/Downloads/PARTNER_capstone_data.xlsx")
+glimpse(partner)
+```
+
+## clean up the data
+```{r cleaning_1}
+partner_1 <- partner %>%
+  select(-c(ICU_ENCOUNTER_NUM,Admit, Discharge, CURRENT_UNIT_ADMISSION_DT_TM, CURRENT_UNIT_DISCHARGE_DT_TM, `Day of Admission`, `Day of Discharge`))
+
+## changes NULL into NA
+partner_1[partner_1 == "NULL"]= NA
+
+## convert character columns that should be numeric
+partner_1[,4:71] <- sapply(partner_1[,4:71],as.numeric)
+partner_1[,94:97] <- sapply(partner_1[,94:97],as.numeric)
+
+## clean up column name
+partner_1 <- partner_1 %>%
+  rename(in_partner ='In PARTNER')
+
+glimpse(partner_1)
+
+```
+
+
+```{r cleaning_2}
+
+## move numeric columns to front end of data set, and character to the back end
+partner_2 <- partner_1 %>%
+  relocate(where(is.numeric))
+
+glimpse(partner_2)
+
+## convert in partner to yes/no factor
+partner_2$in_partner <- if_else(partner_2$in_partner == 1, "yes","no")
+
+partner_2$in_partner <- factor(partner_2$in_partner, levels=c("yes","no"))
+
+levels(partner_2$in_partner)
+
+partner_2$Criteria <- tolower(partner_2$Criteria)
+
+partner_3 <- partner_2 %>%
+  select(!c(ICP_d1:ICP_d5,ICD10_Diagnosis2,ICD10_Diagnosis3,ICD10_Diagnosis4,
+            ICD10_Diagnosis5,ICD10_Diagnosis6))
+
+names(partner_3) <- str_replace_all(names(partner_3)," ","_")
+
+glimpse(partner_3)
+```
+
+```{r cleaning_3}
+
+##tidying up the cleaning
+
+partner_3$MV_totaldays[is.na(partner_3$MV_totaldays)]<-0
+
+partner_3 <- partner_3 %>%
+  mutate_at(vars(RBC_Tran1:RBC_Tran5), ~replace_na(.,0))
+
+partner_3$RBC_Tran1[partner_3$RBC_Tran1 <0]<-0
+
+summary(partner_3)
+
+partner_3 %>%
+  select(starts_with("rbc")) %>%
+  summary()
+glimpse(partner_3)
+
+unique(partner_3$ICD_10_Name_1)
+
+data.frame(colnames(partner_3))
+
+partner_3$old_dc <- if_else(partner_3$Criteria == "both" |partner_3$Criteria == "one",
+                            1,0)
+
+partner_3$both_dc <- if_else(partner_3$old_dc == 1 & partner_3$in_partner =="yes", "both",
+                             if_else(partner_3$old_dc == 1 & partner_3$in_partner =="no", "old",
+                                     if_else(partner_3$old_dc == 0 & partner_3$in_partner =="yes", "new","none")))
+
+partner_3$mv_pos_1 <- if_else(partner_3$MV_totaldays == 1, 1,0)
+partner_3$mv_pos_2 <- if_else(partner_3$MV_totaldays == 2, 1,0)
+partner_3$mv_pos_3 <- if_else(partner_3$MV_totaldays >= 3, 1,0)
+
+data.frame(colnames(partner_3))
+glimpse(partner_3)
+
+
+```
+
+## EDA
+#### Summary of datasets
+```{r split_datasets}
+zero_los <- partner_3%>%
+  filter(LOS == 0)
+
+zero_los_sum <- zero_los %>%
+  group_by(in_partner)%>%
+  summarise(number=n())
+
+one_los <- partner_3%>%
+  filter(LOS == 1)
+
+one_los_sum <-one_los %>%
+  group_by(in_partner)%>%
+  summarise(number=n())
+
+two_los <- partner_3%>%
+  filter(LOS >=2) 
+
+
+two_los_sum<-two_los %>%
+  group_by(in_partner)%>%
+  summarise(number=n())
+```
+
+```{r summary}
+
+save_skimrzerolos <- zero_los%>%
+  group_by(in_partner)%>%
+  skim()%>%
+  select(skim_variable,skim_type, in_partner,n_missing, complete_rate, numeric.mean, numeric.sd, numeric.p50, numeric.hist)
+
+save_skimr1los <- one_los%>%
+  group_by(in_partner)%>%
+  skim()%>%
+  select(skim_variable,skim_type, in_partner,n_missing, complete_rate, numeric.mean, numeric.sd, numeric.p50, numeric.hist)
+
+
+save_skimr2los <- two_los%>%
+  group_by(in_partner)%>%
+  skim()%>%
+  select(skim_variable,skim_type, in_partner,n_missing, complete_rate, numeric.mean, numeric.sd, numeric.p50, numeric.hist)
+
+save_skim_wholepartner <- partner_3%>%
+  group_by(in_partner)%>%
+  skim()%>%
+  select(skim_variable,skim_type, in_partner,n_missing, complete_rate, numeric.mean, numeric.sd, numeric.p50, numeric.hist)
+
+
+
+write.csv(save_skimrzerolos,"skimrzerolos.csv")
+write.csv(save_skimr1los,"skimronelos.csv")
+write.csv(save_skimr2los,"skimrtwolos.csv")
+write.csv(save_skim_wholepartner,"skimrpartner.csv")
+
+save_skim_wholepartner
+save_skimrzerolos
+save_skimr1los
+save_skimr2los
+
+```
+
+#### Plots and Visuals 
+```{r feature_plots}
+
+### set up feature plot graph 
+
+time_vars <- partner_3 %>%
+  select(ends_with(c("1","2","3")), in_partner)%>%
+  select(starts_with(c("GCS_Eye","GCS_Verbal","GCS_Motor","Total_GCS",
+                       "RBC", "Plat_max","Plat_min","WBC","Hgb","Lactate",
+                       "Vasopressor","Sofa","ICD")),in_partner)
+
+patient_info <- partner_3 %>%
+  select(in_partner,ELIX,hosp_death,LOS,Readmit_day,Age,MV_totaldays)
+
+
+featurePlot(x = patient_info[,2:7],
+            y = patient_info$in_partner, 
+            plot = "box",
+            strip=strip.custom(par.strip.text=list(cex=.7)),
+            scales = list(x = list(relation="free"), 
+                          y = list(relation="free")))
+
+###GCS plot
+
+featurePlot(x = time_vars[,1:12],
+            y = time_vars$in_partner, 
+            plot = "box",
+            strip=strip.custom(par.strip.text=list(cex=.7)),
+            scales = list(x = list(relation="free"), 
+                          y = list(relation="free")))
+
+###blood_work
+
+featurePlot(x = time_vars[,13:30],
+            y = time_vars$in_partner, 
+            plot = "box",
+            strip=strip.custom(par.strip.text=list(cex=.7)),
+            scales = list(x = list(relation="free"), 
+                          y = list(relation="free")))
+
+###vassopressor and sofa
+featurePlot(x = time_vars[,31:36],
+            y = time_vars$in_partner, 
+            plot = "box",
+            strip=strip.custom(par.strip.text=list(cex=.7)),
+            scales = list(x = list(relation="free"), 
+                          y = list(relation="free")))
+
+time_vars %>%
+  group_by(in_partner)%>%
+  skim()%>%
+  select(skim_variable,skim_type, in_partner,n_missing, complete_rate, numeric.mean, numeric.sd, numeric.p50, numeric.hist)
+
+
+
+
+```
+
+
+```{r feature_plots1}
+
+g1 <- partner_3 %>%
+  ggplot(aes(x=in_partner, fill = in_partner))+
+  geom_bar()+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y= element_blank(),
+        axis.ticks.y = element_blank())+
+  geom_text(aes(label = sprintf('%d',
+                                ..count..)), 
+            stat = "count")+
+  ggtitle("Self-Audit")+
+  scale_fill_discrete(name="In Partner")
+
+partner_3$old_dc<- if_else(partner_3$old_dc == 1, "yes","no")
+
+
+partner_3$old_dc <- factor(partner_3$old_dc, levels=c("yes","no"))
+
+
+g2 <- partner_3 %>%
+  ggplot(aes(x = old_dc,fill= old_dc))+
+  geom_bar()+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y= element_blank(),
+        axis.ticks.y = element_blank())+
+  geom_text(aes(label = sprintf('%d',
+                                ..count..)), 
+            stat = "count")+
+  ggtitle("Old Digital Criteria")+
+  scale_fill_discrete(name="In Partner")
+
+##breaks =c("yes","no") )
+
+g3 <-partner_3 %>%
+  ggplot(aes(both_dc, fill= both_dc))+
+  geom_bar()+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y= element_blank(),
+        axis.ticks.y = element_blank())+
+  geom_text(aes(label = sprintf('%d',
+                                ..count..)), 
+            stat = "count")+
+  ggtitle("Overview of DC")+
+  scale_fill_discrete(name="Overview")
+
+
+grid.arrange(g2, g1,g3, nrow = 1)
+
+
+
+
+
+
+
+
+
+```
+
+```{r feature_plots2}
+
+g5 <- zero_los_sum%>%
+  ggplot(aes(x=in_partner,y=zero_los_sum$number, fill= as.factor(in_partner)))+
+  geom_bar(stat = 'identity')+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y= element_blank(),
+        axis.ticks.y = element_blank())+
+  ggtitle("Patients with Zero LOS")+
+  geom_text(aes(label=zero_los_sum$number), position=position_dodge(width=0.9), vjust=-0.25)+
+  scale_fill_discrete(name="In Partner")
+
+g6 <- one_los_sum%>%
+  ggplot(aes(x=in_partner,y=one_los_sum$number, fill= as.factor(in_partner)))+
+  geom_bar(stat = 'identity')+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y= element_blank(),
+        axis.ticks.y = element_blank())+
+  ggtitle("Patients with One LOS")+
+  geom_text(aes(label=one_los_sum$number), position=position_dodge(width=0.9), vjust=-0.25)+
+  scale_fill_discrete(name="In Partner")
+
+g7 <- two_los_sum%>%
+  ggplot(aes(x=in_partner,y=two_los_sum$number, fill= as.factor(in_partner)))+
+  geom_bar(stat = 'identity')+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y= element_blank(),
+        axis.ticks.y = element_blank())+
+  ggtitle("Patients with Two LOS")+
+  geom_text(aes(label=two_los_sum$number), position=position_dodge(width=0.9), vjust=-0.25)+
+  scale_fill_discrete(name="In Partner")
+
+grid.arrange(g5, g6,g7, nrow = 1)
+
+### add percent in each group per LOS
+two_los_sum$perc_inpartner <- two_los_sum$number/(sum(two_los_sum$number))  
+one_los_sum$perc_inpartner <- one_los_sum$number/(sum(one_los_sum$number))  
+zero_los_sum$perc_inpartner <- zero_los_sum$number/(sum(zero_los_sum$number))
+
+zero_los_sum$perc_inpartner
+one_los_sum$perc_inpartner
+two_los_sum$perc_inpartner
+```
+
+```{r gcs_graph}
+gcs_graph <- partner_3 %>%
+  select(Total_GCS_1,Total_GCS_2,Total_GCS_3, in_partner)
+
+gcs_graph <- gcs_graph %>%
+  pivot_longer(cols = 1:3)
+
+gcs_graph%>%
+  ggplot(aes(x= name, y=value, fill=in_partner))+
+  geom_boxplot()+
+  xlab("GCS")+
+  ylab("score")+
+  ggtitle("GCS Day One - Day Three")
+
+
+gcs_graph%>%
+  ggplot(aes(x= name, y=value, fill=in_partner))+
+  geom_violin()+
+  xlab("GCS")+
+  ylab("score")+
+  ggtitle("GCS Day One - Day Three")
+
+
+
+```
+
+```{r sofa_graph}
+
+sofa_graph <- partner_3 %>%
+  select(Sofa_Day_1,SOFA_day_2,SOFA_day_3, in_partner)
+
+wbc_graph <- partner_3 %>%
+  select(WBC_d1,WBC_d2,WBC_d3, in_partner)
+
+lactate_graph <- partner_3 %>%
+  select(Lactate_d1,Lactate_d2,Lactate_d3, in_partner)
+
+sofa_graph <-sofa_graph %>%
+  pivot_longer(cols = 1:3)
+
+wbc_graph <- wbc_graph %>%
+  pivot_longer(cols = 1:3)
+
+lactate_graph <- lactate_graph %>%
+  pivot_longer(cols = 1:3)
+
+sofa_graph%>%
+  ggplot(aes(x= name, y=value, fill=in_partner))+
+  geom_boxplot()+
+  xlab("SOFA")+
+  ylab("score")+
+  ggtitle("SOFA Score One - Day Three")
+
+sofa_graph%>%
+  ggplot(aes(x= name, y=value, fill=in_partner))+
+  geom_violin()+
+  xlab("SOFA")+
+  ylab("score")+
+  ggtitle("SOFA Score One - Day Three")
+
+
+
+
+```
+
+```{r wbc_graph}
+wbc_graph%>%
+  filter(value <= 40)%>%
+  ggplot(aes(x= name, y=value, fill=in_partner))+
+  geom_boxplot()+
+  xlab("WBC")+
+  ylab("count")+
+  ggtitle("WBC Day One - Day Three")
+
+wbc_graph%>%
+  filter(value <= 40)%>%
+  ggplot(aes(x= name, y=value, fill=in_partner))+
+  geom_violin()+
+  xlab("WBC")+
+  ylab("count")+
+  ggtitle("WBC Day One - Day Three")
+
+
+
+```
+
+```{r lactate_graph}
+lactate_graph%>%
+  filter(value <= 15)%>%
+  ggplot(aes(x= name, y=value, fill=in_partner))+
+  geom_boxplot()+
+  xlab("lactate")+
+  ylab("count")+
+  ggtitle("Lactate Day One - Day Three")
+
+
+
+lactate_graph%>%
+  filter(value <= 15)%>%
+  ggplot(aes(x= name, y=value, fill=in_partner))+
+  geom_violin()+
+  xlab("lactate")+
+  ylab("count")+
+  ggtitle("Lactate Day One - Day Three")
+
+
+
+```
+
+
+```{r}
+partner_3%>%
+  ggplot(aes(x= in_partner, y=Age, fill=in_partner))+
+  geom_boxplot()+
+  xlab("In Partner")+
+  ylab("Age")+
+  ggtitle("Age")
+
+partner_3%>%
+  ggplot(aes(x= in_partner, y=ELIX, fill=in_partner))+
+  geom_boxplot()+
+  xlab("In Partner")+
+  ylab("Score")+
+  ggtitle("Elix score")
+
+partner_3%>%
+  ggplot(aes(x= in_partner, y=MV_totaldays, fill=in_partner))+
+  geom_boxplot()+
+  xlab("In Partner")+
+  ylab("Days")+
+  ggtitle("Days Mechincal Ventilated")
+
+partner_3%>%
+  ggplot(aes(x= in_partner, y=LOS, fill=in_partner))+
+  geom_boxplot()+
+  xlab("In Partner")+
+  ylab("Days")+
+  ggtitle("Length of Stay")
+```
+
+## Model-time
+
+#### baseline metric
+##### comparing original Digital Criteria with self-audit results
+```{r baseline_metric}
+old_dc_criteria_test <- partner_3 %>%
+  select(Criteria,old_dc,in_partner)
+
+
+old_dc_criteria_test$old_dc<- if_else(old_dc_criteria_test$old_dc == 1, "yes","no")
+
+
+old_dc_criteria_test$old_dc <- factor(old_dc_criteria_test$old_dc, levels=c("yes","no"))
+
+
+glimpse(old_dc_criteria_test)
+
+old_dc_criteria_test %>% 
+  conf_mat(truth = in_partner, estimate = old_dc)
+
+pred_sens_3 <-old_dc_criteria_test %>%
+  sens(truth = in_partner,estimate = old_dc)
+
+pred_spec_3 <-old_dc_criteria_test %>%
+  spec(truth = in_partner,estimate = old_dc)
+
+basline_df <- tibble(
+  "sensitivity"= pred_sens_3$.estimate,
+  "specificity"= pred_spec_3$.estimate
+)
+
+basline_df
+```
+
+####train/test split
+```{r train_test_split}
+## remove columns from main data set
+partner_4 <- partner_3 %>%
+  select(-c(2,6,7,11,12,16,17,21:25,29:31,35,36,40:43,47:50,54:57,61:65,71:74,78:84,93:95))
+
+data.frame(colnames(partner_4))
+
+## convert character variables into factors 
+
+partner_4 <- partner_4%>%
+  mutate_if(is.character,as.factor)
+
+partner_4$index<- 1:nrow(partner_4)
+
+glimpse(partner_4)
+
+set.seed(42)
+splits      <- initial_split(partner_4, strata = in_partner, prop = 0.70)
+
+partner_train <- training(splits)
+partner_test  <- testing(splits)
+```
+
+### Random Forest Model
+#### First Random Forest model
+```{r rf_1}
+
+zero_los_train_index <- partner_train%>%
+  filter(LOS >= 0)
+zero_los_test_index <- partner_test%>%
+  filter(LOS >= 0)
+
+zero_los_sum <- zero_los %>%
+  group_by(in_partner)%>%
+  summarise(number=n())
+
+data.frame(colnames(zero_los))
+
+g
+
+zero_los_train <- zero_los_train_index %>%
+  select(-c(3,4,6,7,9,10,12,13,15,16,18,19,21,22,24,25,27,28,30:32,35,36,38,39,49,50,51))
+
+zero_los_test <- zero_los_test_index %>%
+  select(-c(3,4,6,7,9,10,12,13,15,16,18,19,21,22,24,25,27,28,30:32,35,36,38,39,49,50,51))
+
+data.frame(colnames(zero_los_train))
+
+glimpse(zero_los)
+
+
+zero_los_recipe <- recipe(in_partner~., data = zero_los_train)%>%
+  ##step_dummy(all_nominal_predictors())%>%
+  step_impute_bag(all_predictors())%>%
+  step_range(all_numeric(), min = 0, max = 1)
+
+cores <- parallel::detectCores()
+cores
+
+
+rf_mod <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees= 2500) %>% 
+  set_engine("ranger", num.threads = cores, importance = "impurity") %>% 
+  set_mode("classification")
+
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(zero_los_recipe)
+
+cv <- vfold_cv(partner_train, v = 5)
+
+set.seed(345)
+rf_res <- 
+  rf_workflow %>% 
+  tune_grid(cv,
+            grid = 10,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc))
+
+rf_res %>% 
+  collect_metrics()%>%
+  arrange(desc(mean))
+
+rf_res %>%
+  collect_predictions()
+
+
+autoplot(rf_res)
+
+rf_res %>% 
+  show_best(metric = "roc_auc")
+
+rf_best <- 
+  rf_res %>% 
+  select_best(metric = "roc_auc")
+rf_best
+
+final_rf <- finalize_workflow(
+  rf_workflow,
+  rf_best
+)
+
+final_rf
+
+final_rf %>%
+  fit(data = zero_los_train) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point",num_features = 10)
+
+```
+
+```{r rf_1.1}
+# last_rf_mod <- 
+#   rand_forest(mtry = 6, min_n = 9, trees = 2500) %>% 
+#   set_engine("ranger", importance = "impurity") %>% 
+#   set_mode("classification")
+# 
+# # the last workflow
+# last_rf_workflow <- 
+#   rf_workflow %>% 
+#   update_model(last_rf_mod)
+
+train_fit_rf <- fit(final_rf,zero_los_train)
+
+
+test_pred_rf <- predict(train_fit_rf, zero_los_test, type = "prob") %>%
+  bind_cols(predict(train_fit_rf, zero_los_test)) %>%
+  bind_cols(select(zero_los_test, in_partner)) %>%
+  glimpse()
+
+cm_rf <- test_pred_rf %>% 
+  conf_mat(truth = in_partner, estimate = .pred_class)
+
+autoplot(cm_rf, type = "heatmap")+
+  ggtitle("Random Forest - Day One")
+
+test_pred_rf %>%
+  ggplot() +
+  geom_density(aes(x = .pred_yes, fill = in_partner), 
+               alpha = 0.5)+
+  ggtitle("Random Forest Probability of Yes - Day One")+
+  xlab("Probability of Yes")
+
+rf_auc <- 
+  test_pred_rf%>%
+  roc_curve(in_partner, .pred_yes) %>% 
+  mutate(model = "Random Forest") 
+
+pred_sens_rf <-test_pred_rf %>%
+  sens(truth = in_partner,estimate = .pred_class)
+
+pred_spec_rf <-test_pred_rf%>%
+  spec(truth = in_partner,estimate = .pred_class)
+
+auc_rf <-test_pred_rf %>%
+  roc_auc(truth = in_partner,estimate = .pred_yes)
+
+rf_auc %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)+
+  annotate("text", x = .75, y = .25, 
+           label = paste("AUC =",round(auc_rf$.estimate,3)))+
+  annotate("text", x = .75, y = .20, 
+           label = paste("Sensitivity =",round(pred_sens_rf$.estimate,3)))+
+  annotate("text", x = .75, y = .15, 
+           label = paste("Specificity =",round(pred_spec_rf$.estimate,3)))+
+  ggtitle("Day one variables - Random Forest")
+
+
+# the last fit
+set.seed(345)
+last_rf_fit <- 
+  final_rf%>% 
+  last_fit(splits)
+
+last_rf_fit %>% 
+  collect_metrics()
+
+last_rf_fit %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit()%>% 
+  vip(num_features = 25)+
+  ggtitle("Day one Variables of Importance - Random Forest")
+
+zero_los_test_index$prob_yes<- test_pred_rf$.pred_yes
+
+
+zero_los_result <- zero_los_test_index %>%
+  select(index,in_partner,prob_yes)
+
+
+```
+
+#### Second Random Forest Model
+```{r rf_two}
+one_los_train_index <- partner_train%>%
+  filter(LOS >= 1)
+
+one_los_test_index <- partner_test%>%
+  filter(LOS >= 1)
+
+
+data.frame(colnames(one_los_train_index))
+
+one_los_train <- one_los_train_index %>%
+  select(ends_with(c("1","2")), Age, ELIX, ICU_Cat,in_partner,ICD10_Name3:ICD10_Name6)
+
+one_los_test <- one_los_test_index %>%
+  select(ends_with(c("1","2")), Age, ELIX, ICU_Cat,in_partner,ICD10_Name3:ICD10_Name6)
+
+
+
+data.frame(colnames(one_los_train))
+
+
+one_los_recipe <- recipe(in_partner~., data = one_los_train)%>%
+  ##step_dummy(all_nominal_predictors(),one_hot = T) %>%
+  step_impute_bag(all_predictors())%>%
+  step_range(all_numeric(), min = 0, max = 1)
+
+cores <- parallel::detectCores()
+cores
+
+
+rf_mod_1 <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 2500) %>% 
+  set_engine("ranger", num.threads = cores, importance= "impurity") %>% 
+  set_mode("classification")
+
+rf_workflow_1 <- 
+  workflow() %>% 
+  add_model(rf_mod_1) %>% 
+  add_recipe(one_los_recipe)
+
+cv <- vfold_cv(one_los_train, v = 5)
+
+set.seed(345)
+rf_res_1 <- 
+  rf_workflow_1 %>% 
+  tune_grid(cv,
+            grid = 10,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc))
+
+rf_res_1 %>% 
+  collect_metrics()%>%
+  arrange(desc(mean))
+
+rf_res_1 %>%
+  collect_predictions()
+
+
+autoplot(rf_res_1)
+
+rf_res_1 %>% 
+  show_best(metric = "roc_auc")
+
+rf_best_1 <- 
+  rf_res_1 %>% 
+  select_best(metric = "roc_auc")
+rf_best_1
+
+final_rf_1<- finalize_workflow(
+  rf_workflow_1,
+  rf_best_1
+)
+
+final_rf_1
+
+final_rf_1 %>%
+  fit(data = one_los_train) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point",num_features = 10)
+
+
+```
+
+```{r rf_2.1}
+# last_rf_mod_1 <- 
+#   rand_forest(mtry = 7, min_n = 19, trees = 2500) %>% 
+#   set_engine("ranger", importance = "impurity") %>% 
+#   set_mode("classification")
+# 
+# # the last workflow
+# last_rf_workflow_1 <- 
+#   rf_workflow_1 %>% 
+#   update_model(last_rf_mod_1)
+
+train_fit_rf_1 <- fit(final_rf_1,one_los_train)
+
+
+test_pred_rf_1 <- predict(train_fit_rf_1, one_los_test, type = "prob") %>%
+  bind_cols(predict(train_fit_rf_1, one_los_test)) %>%
+  bind_cols(select(one_los_test, in_partner)) %>%
+  glimpse()
+
+cm_rf_1 <- test_pred_rf_1 %>% 
+  conf_mat(truth = in_partner, estimate = .pred_class)
+
+autoplot(cm_rf_1, type = "heatmap")+
+  ggtitle("Random Forest - Day Two")
+
+test_pred_rf_1 %>%
+  ggplot() +
+  geom_density(aes(x = .pred_yes, fill = in_partner), 
+               alpha = 0.5)+
+  ggtitle("Random Forest Probability of Yes - Day Two")+
+  xlab("Probability of Yes")
+
+rf_auc_1 <- 
+  test_pred_rf_1%>%
+  roc_curve(in_partner, .pred_yes) %>% 
+  mutate(model = "Random Forest") 
+
+pred_sens_rf_1 <-test_pred_rf_1 %>%
+  sens(truth = in_partner,estimate = .pred_class)
+
+pred_spec_rf_1 <-test_pred_rf_1 %>%
+  spec(truth = in_partner,estimate = .pred_class)
+
+auc_rf_1 <-test_pred_rf_1 %>%
+  roc_auc(truth = in_partner,estimate = .pred_yes)
+
+rf_auc_1 %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)+
+  annotate("text", x = .75, y = .25, 
+           label = paste("AUC =",round(auc_rf_1$.estimate,3)))+
+  annotate("text", x = .75, y = .20, 
+           label = paste("Sensitivity =",round(pred_sens_rf_1$.estimate,3)))+
+  annotate("text", x = .75, y = .15, 
+           label = paste("Specificity =",round(pred_spec_rf_1$.estimate,3)))+
+  ggtitle("Day Two variables - Random Forest")
+
+
+# the last fit
+set.seed(345)
+last_rf_fit_1 <- 
+  final_rf_1 %>% 
+  last_fit(splits)
+
+last_rf_fit_1 %>% 
+  collect_metrics()
+
+last_rf_fit_1 %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit()%>% 
+  vip(num_features = 25)+
+  ggtitle("Day Two Variables of Importance - Random Forest")
+
+one_los_test_index$prob_yes<- test_pred_rf_1$.pred_yes
+
+
+one_los_result <- one_los_test_index %>%
+  select(index,in_partner,prob_yes)
+```
+
+#### Third Random Forest Model 
+```{r rf_three}
+two_los_train_index <- partner_train%>%
+  filter(LOS >= 2)
+
+two_los_test_index <- partner_test%>%
+  filter(LOS >= 2)
+
+
+data.frame(colnames(two_los_train_index))
+
+two_los_train <- two_los_train_index %>%
+  select(-c(LOS,index))
+
+two_los_test <- two_los_test_index %>%
+  select(-c(LOS,index))
+
+
+
+
+data.frame(colnames(two_los_train))
+
+
+two_los_recipe <- recipe(in_partner~., data = two_los_train)%>%
+  ##step_dummy(all_nominal_predictors(),one_hot = T) %>%
+  step_impute_bag(all_predictors())%>%
+  step_range(all_numeric(), min = 0, max = 1)
+
+cores <- parallel::detectCores()
+cores
+
+
+rf_mod_2 <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 2500) %>% 
+  set_engine("ranger", num.threads = cores, importance = "impurity") %>% 
+  set_mode("classification")
+
+rf_workflow_2 <- 
+  workflow() %>% 
+  add_model(rf_mod_2) %>% 
+  add_recipe(two_los_recipe)
+
+cv <- vfold_cv(two_los_train, v = 5)
+
+set.seed(345)
+rf_res_2<- 
+  rf_workflow_2 %>% 
+  tune_grid(cv,
+            grid = 10,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc))
+
+rf_res_2 %>% 
+  collect_metrics()%>%
+  arrange(desc(mean))
+
+rf_res_2 %>%
+  collect_predictions()
+
+
+autoplot(rf_res_2)
+
+rf_res_2 %>% 
+  show_best(metric = "roc_auc")
+
+rf_best_2 <- 
+  rf_res_2 %>% 
+  select_best(metric = "roc_auc")
+rf_best_2
+
+final_rf_2<- finalize_workflow(
+  rf_workflow_2,
+  rf_best_2
+)
+
+final_rf_2
+
+final_rf_2 %>%
+  fit(data = two_los_train) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point",num_features = 10)
+
+```
+
+```{r rf_3.1}
+
+# ####
+# last_rf_mod_2 <- 
+#   rand_forest(mtry = 7, min_n = 29, trees = 2500) %>% 
+#   set_engine("ranger", importance = "impurity") %>% 
+#   set_mode("classification")
+# 
+# # the last workflow
+# last_rf_workflow_2 <- 
+#   rf_workflow_2%>% 
+#   update_model(last_rf_mod_2)
+
+train_fit_rf_2 <- fit(final_rf_2,two_los_train)
+
+
+test_pred_rf_2 <- predict(train_fit_rf_2, two_los_test, type = "prob") %>%
+  bind_cols(predict(train_fit_rf_2, two_los_test)) %>%
+  bind_cols(select(two_los_test, in_partner)) %>%
+  glimpse()
+
+cm_rf_2 <- test_pred_rf_2 %>% 
+  conf_mat(truth = in_partner, estimate = .pred_class)
+
+autoplot(cm_rf_2, type = "heatmap")+
+  ggtitle("Random Forest - Day Three")
+
+test_pred_rf_2 %>%
+  ggplot() +
+  geom_density(aes(x = .pred_yes, fill = in_partner), 
+               alpha = 0.5)+
+  ggtitle("Random Forest Probability of Yes - Day Three")+
+  theme_set(theme_classic())+
+  labs(fill = "In Partner")+
+  xlab("Probability of Yes")
+
+rf_auc_2 <- 
+  test_pred_rf_2%>%
+  roc_curve(in_partner, .pred_yes) %>% 
+  mutate(model = "Random Forest") 
+
+pred_sens_rf_2 <-test_pred_rf_2 %>%
+  sens(truth = in_partner,estimate = .pred_class)
+
+pred_spec_rf_2 <-test_pred_rf_2 %>%
+  spec(truth = in_partner,estimate = .pred_class)
+
+auc_rf_2 <-test_pred_rf_2 %>%
+  roc_auc(truth = in_partner,estimate = .pred_yes)
+
+rf_auc_2 %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)+
+  annotate("text", x = .75, y = .25, 
+           label = paste("AUC =",round(auc_rf_2$.estimate,3)))+
+  annotate("text", x = .75, y = .20, 
+           label = paste("Sensitivity =",round(pred_sens_rf_2$.estimate,3)))+
+  annotate("text", x = .75, y = .15, 
+           label = paste("Specificity =",round(pred_spec_rf_2$.estimate,3)))+
+  ggtitle("Day Three variables - Random Forest")
+
+
+# the last fit
+set.seed(345)
+last_rf_fit_2 <- 
+  final_rf_2 %>% 
+  last_fit(splits)
+
+last_rf_fit_2 %>% 
+  collect_metrics()
+
+last_rf_fit_2 %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit()%>% 
+  vip(num_features = 25)+
+  ggtitle("Day Three Variables of Importance - Random Forest")
+
+two_los_test_index$prob_yes<- test_pred_rf_2$.pred_yes
+
+
+two_los_result <- two_los_test_index %>%
+  select(index,in_partner,prob_yes)
+
+
+```
+### XGBoost Model time
+#### First Model 
+```{r xgb_zero}
+zero_los_recipe <- recipe(in_partner~., data = zero_los_train)%>%
+  step_dummy(all_nominal_predictors())%>%
+  step_impute_bag(all_predictors())%>%
+  step_range(all_numeric(), min = 0, max = 1)
+
+cores <- parallel::detectCores()
+cores
+
+
+
+gb_mod <- boost_tree(
+  trees = 1000, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost", num.threads = cores) %>% 
+  set_mode("classification")
+
+gb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), zero_los_train),
+  learn_rate(),
+  size = 30
+)
+
+gb_workflow <- 
+  workflow() %>% 
+  add_model(gb_mod) %>% 
+  add_recipe(zero_los_recipe)
+
+cv <- vfold_cv(zero_los_train, v = 5)
+
+set.seed(234)
+gb_res <- gb_workflow%>%
+  tune_grid(
+  resamples = cv,
+  grid = gb_grid,
+  control = control_grid(save_pred = TRUE),
+  metrics = metric_set(roc_auc)
+)
+
+gb_res %>% 
+  collect_metrics()%>%
+  arrange(desc(mean))
+
+gb_res %>%
+  collect_predictions()
+
+
+autoplot(gb_res)
+
+gb_res %>% 
+  show_best(metric = "roc_auc")
+
+gb_best <- 
+  gb_res%>% 
+  select_best(metric = "roc_auc")
+
+final_gb<- finalize_workflow(
+  gb_workflow,
+  gb_best
+)
+
+final_gb
+
+final_gb %>%
+  fit(data = zero_los_train) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point",num_features = 10)
+
+### test script to find top VIP
+# vip_test <- final_gb %>%
+#   fit(data = zero_los_train) %>%
+#   pull_workflow_fit() %>%
+#   vip(geom = "point",num_features = 10, horizontal = F)
+# 
+# vip_test$data
+# 
+# test_vars <- slice_head(vip_test$data, n=15)
+#  test_pivot <- colnames(test_vars %>%
+#    pivot_wider( names_from = Variable, values_from = Importance))
+#  
+# test_select <- zero_los_test %>%
+#   select(test_pivot, in_partner)
+# 
+# train_select <- zero_los_train %>%
+#   select(test_pivot, in_partner)
+# 
+# glimpse(vip_test$data)
+# 
+# final_wf <- gb_workflow %>%
+#   update_recipe(recipe(in_partner~., data = train_select))
+# 
+# final_gb<- finalize_workflow(
+#   final_wf,
+#   gb_best
+# )
+# 
+# glimpse(zero_los_train)
+```
+
+```{r gb_1.1}
+
+# last_gb_mod <- 
+#   boost_tree(
+#     trees = 1000, 
+#     mtry = 7, 
+#     min_n = 22, 
+#     tree_depth = 9, 
+#     learn_rate = 1.04e-2,
+#     loss_reduction = 0.00000000265,                     
+#     sample_size= 0.899 
+#       ) %>% 
+#   set_engine("xgboost") %>% 
+#   set_mode("classification")
+# 
+# # the last workflow
+# last_gb_workflow <- 
+#   gb_workflow%>% 
+#   update_model(last_gb_mod)
+
+train_fit_gb <- fit(final_gb,zero_los_train)
+
+
+test_pred_gb <- predict(train_fit_gb, zero_los_test, type = "prob") %>%
+  bind_cols(predict(train_fit_gb, zero_los_test)) %>%
+  bind_cols(select(zero_los_test, in_partner)) %>%
+  glimpse()
+
+cm_gb <- test_pred_gb %>% 
+  conf_mat(truth = in_partner, estimate = .pred_class)
+
+autoplot(cm_gb, type = "heatmap")+
+  ggtitle("XGBoost - Day One")
+
+test_pred_gb %>%
+  ggplot() +
+  geom_density(aes(x = .pred_yes, fill = in_partner), 
+               alpha = 0.5)+
+  ggtitle("XGBoost Probability of Yes - Day One")+
+  xlab("Probability of Yes")
+
+gb_auc <- 
+  test_pred_gb%>%
+  roc_curve(in_partner, .pred_yes) %>% 
+  mutate(model = "XGBoost") 
+
+pred_sens_gb <-test_pred_gb %>%
+  sens(truth = in_partner,estimate = .pred_class)
+
+pred_spec_gb <-test_pred_gb %>%
+  spec(truth = in_partner,estimate = .pred_class)
+
+auc_gb<-test_pred_gb %>%
+  roc_auc(truth = in_partner,estimate = .pred_yes)
+
+gb_auc %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)+
+  annotate("text", x = .75, y = .25, 
+           label = paste("AUC =",round(auc_gb$.estimate,3)))+
+  annotate("text", x = .75, y = .20, 
+           label = paste("Sensitivity =",round(pred_sens_gb$.estimate,3)))+
+  annotate("text", x = .75, y = .15, 
+           label = paste("Specificity =",round(pred_spec_gb$.estimate,3)))+
+  ggtitle("Day one variables - XGBoost")
+
+
+# # the last fit
+set.seed(345)
+last_gb_fit <-
+  final_gb %>%
+  last_fit(splits)
+
+last_gb_fit %>%
+  collect_metrics()
+
+last_gb_fit %>%
+  pluck(".workflow", 1) %>%
+  pull_workflow_fit()%>%
+  vip(num_features = 25)+
+  ggtitle("Day One Variables of Importance - XGBoost")
+
+zero_los_test_index$prob_yes_xgb<- test_pred_gb$.pred_yes
+
+
+zero_los_result <- zero_los_test_index %>%
+  select(index,in_partner,prob_yes,prob_yes_xgb)
+
+
+```
+#### Second XGB Model 
+```{r xgb_two}
+one_los_recipe <- recipe(in_partner~., data = one_los_train)%>%
+  step_dummy(all_nominal_predictors())%>%
+  step_impute_bag(all_predictors())%>%
+  step_range(all_numeric(), min = 0, max = 1)
+
+cores <- parallel::detectCores()
+cores
+
+
+
+gb_mod_1 <- boost_tree(
+  trees = 1000, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost", num.threads = cores) %>% 
+  set_mode("classification")
+
+gb_grid_1 <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), one_los_train),
+  learn_rate(),
+  size = 30
+)
+
+gb_workflow_1 <- 
+  workflow() %>% 
+  add_model(gb_mod_1) %>% 
+  add_recipe(one_los_recipe)
+
+cv <- vfold_cv(one_los_train, v = 5)
+
+set.seed(234)
+gb_res_1 <- gb_workflow_1%>%
+  tune_grid(
+    resamples = cv,
+    grid = gb_grid_1,
+    control = control_grid(save_pred = TRUE),
+    metrics = metric_set(roc_auc)
+  )
+
+gb_res_1 %>% 
+  collect_metrics()%>%
+  arrange(desc(mean))
+
+gb_res_1 %>%
+  collect_predictions()
+
+
+autoplot(gb_res_1)
+
+gb_res_1 %>% 
+  show_best(metric = "roc_auc")
+
+
+gb_best_1 <- 
+  gb_res_1%>% 
+  select_best(metric = "roc_auc")
+
+final_gb_1<- finalize_workflow(
+  gb_workflow_1,
+  gb_best_1
+)
+
+final_gb_1
+
+
+final_gb_1 %>%
+  fit(data = one_los_train) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point",num_features = 10)
+```
+
+```{r 2.1}
+
+# last_gb_mod_1 <- 
+#   boost_tree(
+#     trees = 1000, 
+#     mtry = 11, 
+#     min_n = 3, 
+#     tree_depth = 11, 
+#     learn_rate = 1.79e-9,
+#     loss_reduction = 0.00000000137,                     
+#     sample_size= 0.817 
+#   ) %>% 
+#   set_engine("xgboost") %>% 
+#   set_mode("classification")
+# 
+# # the last workflow
+# last_gb_workflow_1 <- 
+#   gb_workflow_1%>% 
+#   update_model(last_gb_mod_1)
+
+train_fit_gb_1 <- fit(final_gb_1,one_los_train)
+
+
+test_pred_gb_1 <- predict(train_fit_gb_1, one_los_test, type = "prob") %>%
+  bind_cols(predict(train_fit_gb_1, one_los_test)) %>%
+  bind_cols(select(one_los_test, in_partner)) %>%
+  glimpse()
+
+cm_gb_1 <- test_pred_gb_1 %>% 
+  conf_mat(truth = in_partner, estimate = .pred_class)
+
+autoplot(cm_gb_1, type = "heatmap")+
+  ggtitle("XGBoost - Day Two")
+
+test_pred_gb_1 %>%
+  ggplot() +
+  geom_density(aes(x = .pred_yes, fill = in_partner), 
+               alpha = 0.5)+
+  ggtitle("XGBoost Probability of Yes - Day Two")+
+  xlab("Probability of Yes")
+
+gb_auc_1 <- 
+  test_pred_gb_1%>%
+  roc_curve(in_partner, .pred_yes) %>% 
+  mutate(model = "XGBOOST") 
+
+pred_sens_gb_1 <-test_pred_gb_1 %>%
+  sens(truth = in_partner,estimate = .pred_class)
+
+pred_spec_gb_1 <-test_pred_gb_1 %>%
+  spec(truth = in_partner,estimate = .pred_class)
+
+auc_gb_1<-test_pred_gb_1%>%
+  roc_auc(truth = in_partner,estimate = .pred_yes)
+
+gb_auc_1 %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)+
+  annotate("text", x = .75, y = .25, 
+           label = paste("AUC =",round(auc_gb_1$.estimate,3)))+
+  annotate("text", x = .75, y = .20, 
+           label = paste("Sensitivity =",round(pred_sens_gb_1$.estimate,3)))+
+  annotate("text", x = .75, y = .15, 
+           label = paste("Specificity =",round(pred_spec_gb_1$.estimate,3)))+
+  ggtitle("Day Two variables - XGBoost")
+
+
+# the last fit
+set.seed(345)
+last_gb_fit_1 <- 
+  final_gb_1 %>% 
+  last_fit(splits)
+
+last_gb_fit_1 %>% 
+  collect_metrics()
+
+last_gb_fit_1 %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit()%>% 
+  vip(num_features = 25)+
+  ggtitle("Day Two Variables of Importance - XGBoost")
+
+one_los_test_index$prob_yes_xgb<- test_pred_gb_1$.pred_yes
+
+
+one_los_result <- one_los_test_index %>%
+  select(index,in_partner,prob_yes,prob_yes_xgb)
+
+glimpse(one_los_result)
+
+
+
+```
+#### Third XGB Model 
+```{r xgb_three}
+two_los_recipe <- recipe(in_partner~., data = two_los_train)%>%
+  step_dummy(all_nominal_predictors())%>%
+  step_impute_bag(all_predictors())%>%
+  step_range(all_numeric(), min = 0, max = 1)
+
+cores <- parallel::detectCores()
+cores
+
+
+
+gb_mod_2 <- boost_tree(
+  trees = 1000, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost", num.threads = cores) %>% 
+  set_mode("classification")
+
+gb_grid_2 <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), two_los_train),
+  learn_rate(),
+  size = 30
+)
+
+gb_workflow_2 <- 
+  workflow() %>% 
+  add_model(gb_mod_2) %>% 
+  add_recipe(two_los_recipe)
+
+cv <- vfold_cv(two_los_train, v = 5)
+
+set.seed(234)
+gb_res_2 <- gb_workflow_2%>%
+  tune_grid(
+    resamples = cv,
+    grid = gb_grid_2,
+    control = control_grid(save_pred = TRUE),
+    metrics = metric_set(roc_auc)
+  )
+
+gb_res_2 %>% 
+  collect_metrics()%>%
+  arrange(desc(mean))
+
+gb_res_2 %>%
+  collect_predictions()
+
+
+autoplot(gb_res_2)
+
+gb_res_2 %>% 
+  show_best(metric = "roc_auc")
+
+gb_best_2 <- 
+  gb_res_2%>% 
+  select_best(metric = "roc_auc")
+
+final_gb_2<- finalize_workflow(
+  gb_workflow_2,
+  gb_best_2
+)
+
+final_gb_2
+```
+
+```{r 3.1}
+
+# last_gb_mod_2 <- 
+#   boost_tree(
+#     trees = 1000, 
+#     mtry = 15, 
+#     min_n = 5, 
+#     tree_depth = 7, 
+#     learn_rate = 5.38e-3,
+#     loss_reduction = 4.03e-7,                     
+#     sample_size= 0.403 
+#   ) %>% 
+#   set_engine("xgboost") %>% 
+#   set_mode("classification")
+# 
+# # the last workflow
+# last_gb_workflow_2 <- 
+#   gb_workflow_2%>% 
+#   update_model(last_gb_mod_2)
+
+train_fit_gb_2 <- fit(final_gb_2,two_los_train)
+
+
+test_pred_gb_2 <- predict(train_fit_gb_2, two_los_test, type = "prob") %>%
+  bind_cols(predict(train_fit_gb_2, two_los_test)) %>%
+  bind_cols(select(two_los_test, in_partner)) %>%
+  glimpse()
+
+cm_gb_2 <- test_pred_gb_2 %>% 
+  conf_mat(truth = in_partner, estimate = .pred_class)
+
+autoplot(cm_gb_2, type="heatmap")+
+  ggtitle("XGBoost - Day Three")
+
+test_pred_gb_2 %>%
+  ggplot() +
+  geom_density(aes(x = .pred_yes, fill = in_partner), 
+               alpha = 0.5)+
+  ggtitle("XGBoost Probability of Yes - Day Three")+
+  xlab("Probability of Yes")
+
+gb_auc_2 <- 
+  test_pred_gb_2%>%
+  roc_curve(in_partner, .pred_yes) %>% 
+  mutate(model = "XGBoost") 
+
+pred_sens_gb_2 <-test_pred_gb_2 %>%
+  sens(truth = in_partner,estimate = .pred_class)
+
+pred_spec_gb_2 <-test_pred_gb_2 %>%
+  spec(truth = in_partner,estimate = .pred_class)
+
+auc_gb_2<-test_pred_gb_2%>%
+  roc_auc(truth = in_partner,estimate = .pred_yes)
+
+gb_auc_2 %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)+
+  annotate("text", x = .75, y = .25, 
+           label = paste("AUC =",round(auc_gb_2$.estimate,3)))+
+  annotate("text", x = .75, y = .20, 
+           label = paste("Sensitivity =",round(pred_sens_gb_2$.estimate,3)))+
+  annotate("text", x = .75, y = .15, 
+           label = paste("Specificity =",round(pred_spec_gb_2$.estimate,3)))+
+  ggtitle("Day Three variables - XGBoost")
+
+
+# the last fit
+set.seed(345)
+last_gb_fit_2 <- 
+  final_gb_2 %>% 
+  last_fit(splits)
+
+last_gb_fit_2 %>% 
+  collect_metrics()
+
+last_gb_fit_2 %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit()%>% 
+  vip(num_features = 25)+
+  ggtitle("Day Three Variables of Importance - XGBoost")
+
+two_los_test_index$prob_yes_xgb<- test_pred_gb_2$.pred_yes
+
+
+two_los_result <- two_los_test_index %>%
+  select(index,in_partner,prob_yes,prob_yes_xgb)
+
+glimpse(two_los_result)
+
+```
+### Join all model results
+```{r master_result}
+
+
+master_result_testset <- left_join(x= zero_los_result, y=one_los_result, by="index")
+master_result_testset <- left_join(x= master_result_testset, y=two_los_result, by="index")
+
+```
+### Pull Random Forest data and Get Average for Two and Three days
+```{r rf_average}
+
+result_testset_rf <- master_result_testset %>%
+  select(in_partner=in_partner.x, prob_yes_rf0=prob_yes.x, prob_yes_rf1=prob_yes.y, prob_yes_rf2=prob_yes)
+
+result_testset_rf$mean_2 <- rowMeans(result_testset_rf[,2:3], na.rm = T)
+result_testset_rf$mean_3 <- rowMeans(result_testset_rf[,2:4], na.rm = T)
+
+result_testset_rf$pred_class_2 <- if_else(result_testset_rf$mean_2>=.5,"yes","no")
+result_testset_rf$pred_class_3 <- if_else(result_testset_rf$mean_3>=.5,"yes","no")
+
+result_testset_rf$pred_class_2 <- factor(result_testset_rf$pred_class_2, levels=c("yes","no"))
+result_testset_rf$pred_class_3 <- factor(result_testset_rf$pred_class_3, levels=c("yes","no"))
+
+```
+### Random Forest Two Day Average 
+```{r two_day_average_rf}
+
+cm_master_rf2 <- result_testset_rf %>% 
+  conf_mat(truth = in_partner, estimate = pred_class_2)
+
+autoplot(cm_master_rf2, type = "heatmap")+
+  ggtitle("Two day average in Random Forest")
+
+result_testset_rf %>%
+  ggplot() +
+  geom_density(aes(x = mean_2, fill = in_partner), 
+               alpha = 0.5)+
+  ggtitle("Two Day Average of Probability Yes in Random Forest")+
+  xlab("Probability of Yes")
+
+rf_master_roc2 <- 
+  result_testset_rf%>%
+  roc_curve(in_partner, mean_2) %>% 
+  mutate(model = "Random Forest") 
+
+rf_master_sens2 <-result_testset_rf %>%
+  sens(truth = in_partner,estimate =pred_class_2)
+
+rf_master_spec2 <-result_testset_rf %>%
+  spec(truth = in_partner,estimate = pred_class_2)
+
+rf_master_auc2<-result_testset_rf%>%
+  roc_auc(truth = in_partner,estimate = mean_2)
+
+rf_master_df2 <- tibble(
+  "sensitivity"= rf_master_sens2$.estimate,
+  "specificity"= rf_master_spec2$.estimate,
+  "auc"= rf_master_auc2$.estimate
+)
+
+rf_master_roc2 %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)+
+  annotate("text", x = .75, y = .25, 
+           label = paste("AUC =",round(rf_master_auc2$.estimate,3)))+
+  annotate("text", x = .75, y = .20, 
+           label = paste("Sensitivity =",round(rf_master_sens2$.estimate,3)))+
+  annotate("text", x = .75, y = .15, 
+           label = paste("Specificity =",round(rf_master_spec2$.estimate,3)))+
+  ggtitle("Average Two days Scores - Random Forest")
+
+
+```
+### Random Forest Three Day Average
+```{r three_day_average_rf}
+cm_master_rf3 <- result_testset_rf %>% 
+  conf_mat(truth = in_partner, estimate = pred_class_3)
+
+autoplot(cm_master_rf3, type = "heatmap")+
+  ggtitle("Three Day Average in Random Forest")
+
+result_testset_rf %>%
+  ggplot() +
+  geom_density(aes(x = mean_3, fill = in_partner), 
+               alpha = 0.5)+
+  ggtitle("Three Day Average of Probability Yes in Random Forest")+
+  xlab("Probability of Yes")
+
+rf_master_roc3 <- 
+  result_testset_rf%>%
+  roc_curve(in_partner, mean_3) %>% 
+  mutate(model = "Random Forest") 
+
+rf_master_sens3 <-result_testset_rf %>%
+  sens(truth = in_partner,estimate =pred_class_3)
+
+rf_master_spec3 <-result_testset_rf %>%
+  spec(truth = in_partner,estimate = pred_class_3)
+
+rf_master_auc3<-result_testset_rf%>%
+  roc_auc(truth = in_partner,estimate = mean_3)
+
+rf_master_df3 <- tibble(
+  "sensitivity"= rf_master_sens3$.estimate,
+  "specificity"= rf_master_spec3$.estimate,
+  "auc"= rf_master_auc3$.estimate
+)
+
+rf_master_roc3 %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)+
+  annotate("text", x = .75, y = .25, 
+           label = paste("AUC =",round(rf_master_auc3$.estimate,3)))+
+  annotate("text", x = .75, y = .20, 
+           label = paste("Sensitivity =",round(rf_master_sens3$.estimate,3)))+
+  annotate("text", x = .75, y = .15, 
+           label = paste("Specificity =",round(rf_master_spec3$.estimate,3)))+
+  ggtitle("Average Three days Scores - Random Forest")
+
+```
+### Pull XGBoost data and Get Average for Two and Three days
+```{r xgb_average}
+result_testset_xgb <- master_result_testset %>%
+  select(in_partner=in_partner.x, prob_yes_xgb0=prob_yes_xgb.x, prob_yes_xgb1=prob_yes_xgb.y, prob_yes_xgb2=prob_yes_xgb)
+
+## make two and three day average of scores
+
+result_testset_xgb$mean_2 <- rowMeans(result_testset_xgb[,2:3], na.rm = T)
+result_testset_xgb$mean_3 <- rowMeans(result_testset_xgb[,2:4], na.rm = T)
+
+result_testset_xgb$pred_class_2 <- if_else(result_testset_xgb$mean_2>=.5,"yes","no")
+result_testset_xgb$pred_class_3 <- if_else(result_testset_xgb$mean_3>=.5,"yes","no")
+
+result_testset_xgb$pred_class_2 <- factor(result_testset_xgb$pred_class_2, levels=c("yes","no"))
+result_testset_xgb$pred_class_3 <- factor(result_testset_xgb$pred_class_3, levels=c("yes","no"))
+```
+
+### XGBoost Two Day Average
+```{r xgb_two_day_avg}
+cm_master_gb2 <- result_testset_xgb %>% 
+  conf_mat(truth = in_partner, estimate = pred_class_2)
+
+autoplot(cm_master_gb2, type="heatmap")+
+  ggtitle("Two Day Average in XGBoost")
+
+result_testset_xgb %>%
+  ggplot() +
+  geom_density(aes(x = mean_2, fill = in_partner), 
+               alpha = 0.5)+
+  ggtitle("Two Day Average of Probability Yes in XGBoost")+
+  xlab("Probability of Yes")
+  
+
+xgb_master_roc2 <- 
+  result_testset_rf%>%
+  roc_curve(in_partner, mean_2) %>% 
+  mutate(model = "XGBOOST") 
+
+xgb_master_sens2 <-result_testset_xgb %>%
+  sens(truth = in_partner,estimate =pred_class_2)
+
+xgb_master_spec2 <-result_testset_xgb %>%
+  spec(truth = in_partner,estimate = pred_class_2)
+
+xgb_master_auc2<-result_testset_xgb%>%
+  roc_auc(truth = in_partner,estimate = mean_2)
+
+xgb_master_df2 <- tibble(
+  "sensitivity"= xgb_master_sens2$.estimate,
+  "specificity"= xgb_master_spec2$.estimate,
+  "auc"= xgb_master_auc2$.estimate
+)
+
+xgb_master_roc2 %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)+
+  annotate("text", x = .75, y = .25, 
+           label = paste("AUC =",round(xgb_master_auc2$.estimate,3)))+
+  annotate("text", x = .75, y = .20, 
+           label = paste("Sensitivity =",round(xgb_master_sens2$.estimate,3)))+
+  annotate("text", x = .75, y = .15, 
+           label = paste("Specificity =",round(xgb_master_spec2$.estimate,3)))+
+  ggtitle("Average Two days Scores - XGBoost")
+
+
+```
+### XGBoost Three Day Average
+```{r xgb_three_day_avg}
+cm_master_gb3 <- result_testset_xgb %>% 
+  conf_mat(truth = in_partner, estimate = pred_class_3)
+
+autoplot(cm_master_gb3, type="heatmap")+
+  ggtitle("Three Day Average in XGBoost")
+
+result_testset_xgb %>%
+  ggplot() +
+  geom_density(aes(x = mean_3, fill = in_partner), 
+               alpha = 0.5)+
+  ggtitle("Three Day Average of Probability Yes in XGBoost")+
+  xlab("Probability of Yes")
+
+
+xgb_master_roc3 <- 
+  result_testset_rf%>%
+  roc_curve(in_partner, mean_3) %>% 
+  mutate(model = "XGBOOST") 
+
+xgb_master_sens3 <-result_testset_xgb %>%
+  sens(truth = in_partner,estimate =pred_class_3)
+
+xgb_master_spec3 <-result_testset_xgb %>%
+  spec(truth = in_partner,estimate = pred_class_3)
+
+xgb_master_auc3<-result_testset_xgb%>%
+  roc_auc(truth = in_partner,estimate = mean_3)
+
+xgb_master_df3 <- tibble(
+  "sensitivity"= xgb_master_sens3$.estimate,
+  "specificity"= xgb_master_spec3$.estimate,
+  "auc"= xgb_master_auc3$.estimate
+)
+
+xgb_master_roc3%>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)+
+  annotate("text", x = .75, y = .25, 
+           label = paste("AUC =",round(xgb_master_auc3$.estimate,3)))+
+  annotate("text", x = .75, y = .20, 
+           label = paste("Sensitivity =",round(xgb_master_sens3$.estimate,3)))+
+  annotate("text", x = .75, y = .15, 
+           label = paste("Specificity =",round(xgb_master_spec3$.estimate,3)))+
+  ggtitle("Average Three days Scores - XGBoost")
+
+
+
+
+
